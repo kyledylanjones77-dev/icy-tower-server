@@ -1,0 +1,10 @@
+services:
+  - type: web
+    runtime: node
+    name: icy-tower-server
+    plan: free
+    buildCommand: npm install
+    startCommand: node server.js
+    envVars:
+      - key: NODE_ENV
+        value: production
