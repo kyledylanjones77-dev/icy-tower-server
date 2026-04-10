@@ -1,53 +1,140 @@
 const http = require('http');
 const fs = require('fs');
+const crypto = require('crypto');
 const { WebSocketServer } = require('ws');
 
-// ==================== LEADERBOARD ====================
+// ==================== DATA FILES ====================
 const LB_FILE = './leaderboard.json';
+const PROFILES_FILE = './profiles.json';
+
 let leaderboard = [];
 try { leaderboard = JSON.parse(fs.readFileSync(LB_FILE, 'utf8')); } catch {}
 function saveLB() { try { fs.writeFileSync(LB_FILE, JSON.stringify(leaderboard)); } catch {} }
 
+let profiles = {}; // { username: { pinHash, wallet, cosmetics, attributes, stats, created, lastLogin } }
+try { profiles = JSON.parse(fs.readFileSync(PROFILES_FILE, 'utf8')); } catch {}
+function saveProfiles() { try { fs.writeFileSync(PROFILES_FILE, JSON.stringify(profiles)); } catch {} }
+
+function hashPin(pin, salt) { return crypto.createHash('sha256').update(salt + ':' + pin).digest('hex'); }
+function readBody(req) {
+  return new Promise((resolve, reject) => {
+    let body = '';
+    req.on('data', c => body += c);
+    req.on('end', () => { try { resolve(JSON.parse(body)); } catch { reject(); } });
+  });
+}
+function json(res, status, data) {
+  res.writeHead(status, { 'Content-Type': 'application/json' });
+  res.end(JSON.stringify(data));
+}
+
 // ==================== HTTP SERVER ====================
-const server = http.createServer((req, res) => {
+const server = http.createServer(async (req, res) => {
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
-  res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
   if (req.method === 'OPTIONS') { res.writeHead(204); res.end(); return; }
 
   // GET /leaderboard — return top 10
   if (req.url === '/leaderboard' && req.method === 'GET') {
-    res.writeHead(200, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify(leaderboard));
-    return;
+    return json(res, 200, leaderboard);
   }
 
   // POST /score — submit a score, update if top 10
   if (req.url === '/score' && req.method === 'POST') {
-    let body = '';
-    req.on('data', c => body += c);
-    req.on('end', () => {
-      try {
-        const { name, floor, score } = JSON.parse(body);
-        if (!name || !floor || floor < 1) { res.writeHead(400); res.end('{}'); return; }
-        const entry = { name: String(name).slice(0, 12).toUpperCase(), floor: Number(floor), score: Number(score || 0), date: new Date().toISOString() };
-        // Only add if it qualifies for top 10
-        if (leaderboard.length < 10 || entry.floor > leaderboard[leaderboard.length - 1].floor) {
-          leaderboard.push(entry);
-          leaderboard.sort((a, b) => b.floor - a.floor || b.score - a.score);
-          leaderboard = leaderboard.slice(0, 10);
-          saveLB();
-        }
-        const rank = leaderboard.findIndex(e => e.name === entry.name && e.floor === entry.floor && e.date === entry.date);
-        res.writeHead(200, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ rank: rank >= 0 ? rank + 1 : 0, leaderboard }));
-      } catch { res.writeHead(400); res.end('{}'); }
-    });
-    return;
+    try {
+      const { name, floor, score } = await readBody(req);
+      if (!name || !floor || floor < 1) return json(res, 400, {});
+      const entry = { name: String(name).slice(0, 12).toUpperCase(), floor: Number(floor), score: Number(score || 0), date: new Date().toISOString() };
+      if (leaderboard.length < 10 || entry.floor > leaderboard[leaderboard.length - 1].floor) {
+        leaderboard.push(entry);
+        leaderboard.sort((a, b) => b.floor - a.floor || b.score - a.score);
+        leaderboard = leaderboard.slice(0, 10);
+        saveLB();
+      }
+      const rank = leaderboard.findIndex(e => e.name === entry.name && e.floor === entry.floor && e.date === entry.date);
+      return json(res, 200, { rank: rank >= 0 ? rank + 1 : 0, leaderboard });
+    } catch { return json(res, 400, {}); }
+  }
+
+  // ==================== PROFILE AUTH ====================
+
+  // POST /register — create account { username, pin }
+  if (req.url === '/register' && req.method === 'POST') {
+    try {
+      const { username, pin } = await readBody(req);
+      const name = String(username || '').trim().toUpperCase().replace(/[^A-Z0-9_\- ]/g, '').slice(0, 12);
+      const pinStr = String(pin || '');
+      if (!name || name.length < 2) return json(res, 400, { error: 'Name must be 2-12 characters' });
+      if (!/^\d{4}$/.test(pinStr)) return json(res, 400, { error: 'PIN must be 4 digits' });
+      if (profiles[name]) return json(res, 409, { error: 'Username taken' });
+
+      const salt = crypto.randomBytes(8).toString('hex');
+      profiles[name] = {
+        pinHash: hashPin(pinStr, salt),
+        salt,
+        wallet: 0,
+        cosmetics: { shoes: 'default', body: 'default', trail: 'default', owned: ['default'] },
+        attributes: { jumpBoost: 0, speedBoost: 0, potionDur: 0, magnetRange: 0 },
+        stats: { gamesPlayed: 0, totalCoins: 0, bestFloor: 0, totalFloors: 0, totalPlaytime: 0, bestScore: 0 },
+        created: new Date().toISOString(),
+        lastLogin: new Date().toISOString()
+      };
+      saveProfiles();
+      const p = profiles[name];
+      return json(res, 201, { ok: true, profile: { username: name, wallet: p.wallet, cosmetics: p.cosmetics, attributes: p.attributes, stats: p.stats } });
+    } catch { return json(res, 400, { error: 'Invalid request' }); }
+  }
+
+  // POST /login — authenticate { username, pin }
+  if (req.url === '/login' && req.method === 'POST') {
+    try {
+      const { username, pin } = await readBody(req);
+      const name = String(username || '').trim().toUpperCase();
+      const pinStr = String(pin || '');
+      if (!profiles[name]) return json(res, 404, { error: 'Account not found' });
+      const p = profiles[name];
+      if (hashPin(pinStr, p.salt) !== p.pinHash) return json(res, 401, { error: 'Wrong PIN' });
+      p.lastLogin = new Date().toISOString();
+      saveProfiles();
+      return json(res, 200, { ok: true, profile: { username: name, wallet: p.wallet, cosmetics: p.cosmetics, attributes: p.attributes, stats: p.stats } });
+    } catch { return json(res, 400, { error: 'Invalid request' }); }
+  }
+
+  // POST /profile/sync — save profile data { username, pin, wallet, cosmetics, attributes, stats }
+  if (req.url === '/profile/sync' && req.method === 'POST') {
+    try {
+      const data = await readBody(req);
+      const name = String(data.username || '').trim().toUpperCase();
+      const pinStr = String(data.pin || '');
+      if (!profiles[name]) return json(res, 404, { error: 'Account not found' });
+      const p = profiles[name];
+      if (hashPin(pinStr, p.salt) !== p.pinHash) return json(res, 401, { error: 'Wrong PIN' });
+
+      // Merge: take higher values for stats, keep server wallet if higher (anti-cheat basic)
+      if (data.wallet !== undefined) p.wallet = Math.max(p.wallet, Number(data.wallet) || 0);
+      if (data.cosmetics) {
+        p.cosmetics = data.cosmetics;
+        if (!p.cosmetics.owned || !Array.isArray(p.cosmetics.owned)) p.cosmetics.owned = ['default'];
+        if (!p.cosmetics.owned.includes('default')) p.cosmetics.owned.push('default');
+      }
+      if (data.attributes) p.attributes = data.attributes;
+      if (data.stats) {
+        const s = data.stats;
+        p.stats.gamesPlayed = Math.max(p.stats.gamesPlayed, s.gamesPlayed || 0);
+        p.stats.totalCoins = Math.max(p.stats.totalCoins, s.totalCoins || 0);
+        p.stats.bestFloor = Math.max(p.stats.bestFloor, s.bestFloor || 0);
+        p.stats.totalFloors = Math.max(p.stats.totalFloors, s.totalFloors || 0);
+        p.stats.totalPlaytime = Math.max(p.stats.totalPlaytime, s.totalPlaytime || 0);
+        p.stats.bestScore = Math.max(p.stats.bestScore, s.bestScore || 0);
+      }
+      saveProfiles();
+      return json(res, 200, { ok: true, profile: { username: name, wallet: p.wallet, cosmetics: p.cosmetics, attributes: p.attributes, stats: p.stats } });
+    } catch { return json(res, 400, { error: 'Invalid request' }); }
   }
 
   res.writeHead(200, { 'Content-Type': 'text/plain' });
-  res.end('Icy Tower Multiplayer Server');
+  res.end('Falling Up Game Server');
 });
 
 // ==================== WEBSOCKET ====================
@@ -147,4 +234,4 @@ wss.on('connection', (ws) => {
 });
 
 const PORT = process.env.PORT || 3000;
-server.listen(PORT, () => console.log(`Icy Tower server on port ${PORT}`));
+server.listen(PORT, () => console.log(`Falling Up server on port ${PORT}`));
