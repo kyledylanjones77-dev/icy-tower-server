@@ -1,13 +1,58 @@
 const http = require('http');
+const fs = require('fs');
 const { WebSocketServer } = require('ws');
 
+// ==================== LEADERBOARD ====================
+const LB_FILE = './leaderboard.json';
+let leaderboard = [];
+try { leaderboard = JSON.parse(fs.readFileSync(LB_FILE, 'utf8')); } catch {}
+function saveLB() { try { fs.writeFileSync(LB_FILE, JSON.stringify(leaderboard)); } catch {} }
+
+// ==================== HTTP SERVER ====================
 const server = http.createServer((req, res) => {
-  res.writeHead(200, { 'Content-Type': 'text/plain', 'Access-Control-Allow-Origin': '*' });
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+  if (req.method === 'OPTIONS') { res.writeHead(204); res.end(); return; }
+
+  // GET /leaderboard — return top 3
+  if (req.url === '/leaderboard' && req.method === 'GET') {
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify(leaderboard));
+    return;
+  }
+
+  // POST /score — submit a score, update if top 3
+  if (req.url === '/score' && req.method === 'POST') {
+    let body = '';
+    req.on('data', c => body += c);
+    req.on('end', () => {
+      try {
+        const { name, floor, score } = JSON.parse(body);
+        if (!name || !floor || floor < 1) { res.writeHead(400); res.end('{}'); return; }
+        const entry = { name: String(name).slice(0, 12).toUpperCase(), floor: Number(floor), score: Number(score || 0), date: new Date().toISOString() };
+        // Only add if it qualifies for top 3
+        if (leaderboard.length < 3 || entry.floor > leaderboard[leaderboard.length - 1].floor) {
+          leaderboard.push(entry);
+          leaderboard.sort((a, b) => b.floor - a.floor || b.score - a.score);
+          leaderboard = leaderboard.slice(0, 3);
+          saveLB();
+        }
+        const rank = leaderboard.findIndex(e => e.name === entry.name && e.floor === entry.floor && e.date === entry.date);
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ rank: rank >= 0 ? rank + 1 : 0, leaderboard }));
+      } catch { res.writeHead(400); res.end('{}'); }
+    });
+    return;
+  }
+
+  res.writeHead(200, { 'Content-Type': 'text/plain' });
   res.end('Icy Tower Multiplayer Server');
 });
 
+// ==================== WEBSOCKET ====================
 const wss = new WebSocketServer({ server });
-const rooms = new Map(); // roomCode -> {players: [ws...], seed: number}
+const rooms = new Map();
 
 function genCode() {
   return Math.random().toString(36).substring(2, 6).toUpperCase();
@@ -39,7 +84,6 @@ wss.on('connection', (ws) => {
         ws.roomCode = msg.code;
         ws.playerNum = room.players.length;
         ws.send(JSON.stringify({ type: 'joined', code: msg.code, playerNum: ws.playerNum, seed: room.seed, count: room.players.length }));
-        // Tell ALL other players someone joined
         for (const p of room.players) {
           if (p !== ws && p.readyState === 1) {
             p.send(JSON.stringify({ type: 'player_joined', playerNum: ws.playerNum, count: room.players.length }));
@@ -49,7 +93,6 @@ wss.on('connection', (ws) => {
       }
 
       case 'state': {
-        // Relay player state to ALL other players in the room
         const room = rooms.get(ws.roomCode);
         if (!room) break;
         const payload = JSON.stringify({
@@ -77,7 +120,6 @@ wss.on('connection', (ws) => {
       }
 
       case 'start': {
-        // Host starts the race — relay to all other players
         const room = rooms.get(ws.roomCode);
         if (!room) break;
         const payload = JSON.stringify({ type: 'race_start', seed: room.seed });
@@ -94,7 +136,6 @@ wss.on('connection', (ws) => {
       const room = rooms.get(ws.roomCode);
       if (room) {
         room.players = room.players.filter(p => p !== ws);
-        // Tell remaining players
         const payload = JSON.stringify({ type: 'player_left', playerNum: ws.playerNum, count: room.players.length });
         for (const p of room.players) {
           if (p.readyState === 1) p.send(payload);
