@@ -15,14 +15,14 @@ const server = http.createServer((req, res) => {
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
   if (req.method === 'OPTIONS') { res.writeHead(204); res.end(); return; }
 
-  // GET /leaderboard — return top 3
+  // GET /leaderboard — return top 10
   if (req.url === '/leaderboard' && req.method === 'GET') {
     res.writeHead(200, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify(leaderboard));
     return;
   }
 
-  // POST /score — submit a score, update if top 3
+  // POST /score — submit a score, update if top 10
   if (req.url === '/score' && req.method === 'POST') {
     let body = '';
     req.on('data', c => body += c);
@@ -31,11 +31,11 @@ const server = http.createServer((req, res) => {
         const { name, floor, score } = JSON.parse(body);
         if (!name || !floor || floor < 1) { res.writeHead(400); res.end('{}'); return; }
         const entry = { name: String(name).slice(0, 12).toUpperCase(), floor: Number(floor), score: Number(score || 0), date: new Date().toISOString() };
-        // Only add if it qualifies for top 3
-        if (leaderboard.length < 3 || entry.floor > leaderboard[leaderboard.length - 1].floor) {
+        // Only add if it qualifies for top 10
+        if (leaderboard.length < 10 || entry.floor > leaderboard[leaderboard.length - 1].floor) {
           leaderboard.push(entry);
           leaderboard.sort((a, b) => b.floor - a.floor || b.score - a.score);
-          leaderboard = leaderboard.slice(0, 3);
+          leaderboard = leaderboard.slice(0, 10);
           saveLB();
         }
         const rank = leaderboard.findIndex(e => e.name === entry.name && e.floor === entry.floor && e.date === entry.date);
