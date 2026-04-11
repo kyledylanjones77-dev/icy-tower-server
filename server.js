@@ -34,6 +34,7 @@ function redisCmd(...args) {
 let leaderboard = [];
 let profiles = {};
 let physics = null; // server-side physics overrides (null = use client defaults)
+let audio = null; // server-side audio overrides (null = use client defaults)
 
 // Load leaderboard from Redis on startup
 async function loadLB() {
@@ -69,6 +70,18 @@ async function loadPhysics() {
 }
 async function savePhysics() {
   try { await redisCmd('SET', 'icy:physics', JSON.stringify(physics)); } catch (e) { console.log('Redis physics save failed:', e.message); }
+}
+
+// Load audio config from Redis
+async function loadAudio() {
+  try {
+    const data = await redisCmd('GET', 'icy:audio');
+    if (data) audio = JSON.parse(data);
+    console.log('Loaded audio from Redis:', audio ? Object.keys(audio).length + ' keys' : 'none (using defaults)');
+  } catch (e) { console.log('Redis audio load failed, using defaults:', e.message); }
+}
+async function saveAudio() {
+  try { await redisCmd('SET', 'icy:audio', JSON.stringify(audio)); } catch (e) { console.log('Redis audio save failed:', e.message); }
 }
 
 function hashPin(pin, salt) { return crypto.createHash('sha256').update(salt + ':' + pin).digest('hex'); }
@@ -207,6 +220,26 @@ const server = http.createServer(async (req, res) => {
     } catch { return json(res, 400, { error: 'Invalid request' }); }
   }
 
+  // ==================== AUDIO CONFIG ====================
+
+  // GET /audio — any player loads the global audio config
+  if (req.url === '/audio' && req.method === 'GET') {
+    return json(res, 200, audio || {});
+  }
+
+  // POST /audio — god's ears pushes new audio (password protected)
+  if (req.url === '/audio' && req.method === 'POST') {
+    try {
+      const data = await readBody(req);
+      if (data.password !== 'ivory') return json(res, 401, { error: 'Wrong password' });
+      delete data.password;
+      audio = data;
+      await saveAudio();
+      console.log('Audio updated:', Object.keys(audio).length, 'keys');
+      return json(res, 200, { ok: true });
+    } catch { return json(res, 400, { error: 'Invalid request' }); }
+  }
+
   res.writeHead(200, { 'Content-Type': 'text/plain' });
   res.end('Falling Up Game Server');
 });
@@ -314,6 +347,7 @@ async function start() {
   await loadLB();
   await loadProfiles();
   await loadPhysics();
+  await loadAudio();
   server.listen(PORT, () => console.log(`Falling Up server on port ${PORT}`));
 }
 start();
