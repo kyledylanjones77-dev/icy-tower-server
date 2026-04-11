@@ -33,6 +33,7 @@ function redisCmd(...args) {
 // ==================== IN-MEMORY CACHE ====================
 let leaderboard = [];
 let profiles = {};
+let physics = null; // server-side physics overrides (null = use client defaults)
 
 // Load leaderboard from Redis on startup
 async function loadLB() {
@@ -56,6 +57,18 @@ async function loadProfiles() {
 }
 async function saveProfiles() {
   try { await redisCmd('SET', 'icy:profiles', JSON.stringify(profiles)); } catch (e) { console.log('Redis profiles save failed:', e.message); }
+}
+
+// Load physics config from Redis
+async function loadPhysics() {
+  try {
+    const data = await redisCmd('GET', 'icy:physics');
+    if (data) physics = JSON.parse(data);
+    console.log('Loaded physics from Redis:', physics ? Object.keys(physics).length + ' keys' : 'none (using defaults)');
+  } catch (e) { console.log('Redis physics load failed, using defaults:', e.message); }
+}
+async function savePhysics() {
+  try { await redisCmd('SET', 'icy:physics', JSON.stringify(physics)); } catch (e) { console.log('Redis physics save failed:', e.message); }
 }
 
 function hashPin(pin, salt) { return crypto.createHash('sha256').update(salt + ':' + pin).digest('hex'); }
@@ -118,14 +131,13 @@ const server = http.createServer(async (req, res) => {
         salt,
         wallet: 0,
         cosmetics: { shoes: 'default', body: 'default', trail: 'default', owned: ['default'] },
-        attributes: { jumpBoost: 0, speedBoost: 0, potionDur: 0, magnetRange: 0 },
         stats: { gamesPlayed: 0, totalCoins: 0, bestFloor: 0, totalFloors: 0, totalPlaytime: 0, bestScore: 0 },
         created: new Date().toISOString(),
         lastLogin: new Date().toISOString()
       };
       await saveProfiles();
       const p = profiles[name];
-      return json(res, 201, { ok: true, profile: { username: name, wallet: p.wallet, cosmetics: p.cosmetics, attributes: p.attributes, stats: p.stats } });
+      return json(res, 201, { ok: true, profile: { username: name, wallet: p.wallet, cosmetics: p.cosmetics, stats: p.stats } });
     } catch { return json(res, 400, { error: 'Invalid request' }); }
   }
 
@@ -140,11 +152,11 @@ const server = http.createServer(async (req, res) => {
       if (hashPin(pinStr, p.salt) !== p.pinHash) return json(res, 401, { error: 'Wrong PIN' });
       p.lastLogin = new Date().toISOString();
       await saveProfiles();
-      return json(res, 200, { ok: true, profile: { username: name, wallet: p.wallet, cosmetics: p.cosmetics, attributes: p.attributes, stats: p.stats } });
+      return json(res, 200, { ok: true, profile: { username: name, wallet: p.wallet, cosmetics: p.cosmetics, stats: p.stats } });
     } catch { return json(res, 400, { error: 'Invalid request' }); }
   }
 
-  // POST /profile/sync — save profile data { username, pin, wallet, cosmetics, attributes, stats }
+  // POST /profile/sync — save profile data { username, pin, wallet, cosmetics, stats }
   if (req.url === '/profile/sync' && req.method === 'POST') {
     try {
       const data = await readBody(req);
@@ -161,7 +173,6 @@ const server = http.createServer(async (req, res) => {
         if (!p.cosmetics.owned || !Array.isArray(p.cosmetics.owned)) p.cosmetics.owned = ['default'];
         if (!p.cosmetics.owned.includes('default')) p.cosmetics.owned.push('default');
       }
-      if (data.attributes) p.attributes = data.attributes;
       if (data.stats) {
         const s = data.stats;
         p.stats.gamesPlayed = Math.max(p.stats.gamesPlayed, s.gamesPlayed || 0);
@@ -172,7 +183,27 @@ const server = http.createServer(async (req, res) => {
         p.stats.bestScore = Math.max(p.stats.bestScore, s.bestScore || 0);
       }
       await saveProfiles();
-      return json(res, 200, { ok: true, profile: { username: name, wallet: p.wallet, cosmetics: p.cosmetics, attributes: p.attributes, stats: p.stats } });
+      return json(res, 200, { ok: true, profile: { username: name, wallet: p.wallet, cosmetics: p.cosmetics, stats: p.stats } });
+    } catch { return json(res, 400, { error: 'Invalid request' }); }
+  }
+
+  // ==================== PHYSICS CONFIG ====================
+
+  // GET /physics — any player loads the global physics config
+  if (req.url === '/physics' && req.method === 'GET') {
+    return json(res, 200, physics || {});
+  }
+
+  // POST /physics — god panel pushes new physics (password protected)
+  if (req.url === '/physics' && req.method === 'POST') {
+    try {
+      const data = await readBody(req);
+      if (data.password !== 'ivory') return json(res, 401, { error: 'Wrong password' });
+      delete data.password; // don't store the password
+      physics = data;
+      await savePhysics();
+      console.log('Physics updated:', Object.keys(physics).length, 'keys');
+      return json(res, 200, { ok: true });
     } catch { return json(res, 400, { error: 'Invalid request' }); }
   }
 
@@ -282,6 +313,7 @@ const PORT = process.env.PORT || 3000;
 async function start() {
   await loadLB();
   await loadProfiles();
+  await loadPhysics();
   server.listen(PORT, () => console.log(`Falling Up server on port ${PORT}`));
 }
 start();
